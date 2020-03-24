@@ -1,0 +1,581 @@
+---
+title: "Retailer Hierarchical Clustering"
+author: "Matt Eisenbrei"
+date: "3/22/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Superstore customer segmentation
+# Data source: https://www.kaggle.com/aksha17/superstore-sales/data
+
+# Goal: I intend to segment customers based on transactional behavior. I will identify the primary differentiating factors by segment and use them to prepare high level marketing offers.
+
+
+## Import and assess the data
+```{r}
+setwd("E:/Matt/Analyses")
+raw.data=read.csv("superstore.csv")
+str(raw.data)
+```
+
+## 9,994 observations of 21 variables.
+
+## Check for NA's and conduct some feature engineering.
+```{r}
+sapply(raw.data,function(x)sum(is.na(x)))
+summary(raw.data)
+```
+
+## No missing or NA values, however some of the variables will require a change in format.
+
+## Now for some feature engineering.
+
+## Convert select factor variables to character variables.
+```{r}
+raw.data$Order.ID=as.character(raw.data$Order.ID)
+raw.data$Customer.ID=as.character(raw.data$Customer.ID)
+```
+
+## Convert the Order.Date and Ship.Date variables to date/time variables from factors.
+```{r}
+raw.data$Order.Date=as.Date(raw.data$Order.Date,format="%d-%m-%y")
+raw.data$Ship.Date=as.Date(raw.data$Ship.Date,format="%d-%m-%y")
+str(raw.data)
+```
+
+## Create a few more explanatory variables.
+```{r}
+library(dplyr)
+superstore=raw.data %>% 
+  mutate(Days.Since.Last.Order=max(raw.data$Order.Date)-raw.data$Order.Date,Days.To.Shipment=raw.data$Ship.Date-raw.data$Order.Date,Profitable=raw.data$Profit>=0) %>% 
+  arrange(Customer.ID,Order.ID)
+str(superstore)
+```
+
+## Convert Days.Since.Last.Order and Days.To.Shipment to numerical format.
+```{r}
+superstore$Days.Since.Last.Order=as.numeric(superstore$Days.Since.Last.Order)
+superstore$Days.To.Shipment=as.numeric(superstore$Days.To.Shipment)
+```
+
+## Convert Profitable to a factor.
+```{r}
+superstore$Profitable=as.factor(superstore$Profitable)
+str(superstore)
+```
+
+## If one of the purposes of this analysis is to cluster customers for future marketing efforts, then the data should be reduced to focus on *current* customers who have made a purchase in the past 2 years.
+
+## Customers who have not made a purchase in the past 2 years may taken their business elsewhere and thus may not best represent future / ongoing customers.
+
+```{r}
+hist(superstore$Days.Since.Last.Order,col="lightblue",breaks=25,labels=T,main="Full Data Set - Days Since Last Customer Order")
+superstore.1=subset(superstore, Days.Since.Last.Order<=730)
+hist(superstore.1$Days.Since.Last.Order,col="cadetblue",breaks=25,labels=T,main="Recent Customers Only - Days Since Last Customer Order")
+str(superstore.1)
+```
+
+## Data set reduced from 9,994 observations to 5,910, a 41% reduction in observations. The remaining observations should be a better predictor of future customer behavior.
+
+## Next I will conduct some EDA to better understand customer transactional behavior.
+```{r}
+library(ggplot2)
+library(corrplot)
+superstore.1.num=superstore.1[,c(18:23)]
+cor.1=corrplot(cor(superstore.1.num),type="lower",method="number")
+```
+
+## The higest correlation is between Profit and Sales at .59 which is logical but also not high enough to drop one of the variables from the data set for redundancy.
+
+## I'll plot Sales against Profit to see if there are cases where goods are being sold at low margins or a loss.
+```{r}
+library(plotly)
+Sales.Profit.plot=plot_ly(data=superstore.1,type="scatter",x=~Sales,y=~Profit,mode="markers")
+Sales.Profit.plot=Sales.Profit.plot %>% layout(title="Plot of Superstore Profit against Sales")
+Sales.Profit.plot
+```
+
+## There are a fair number of loss transactions which are worth exploring further.
+
+## What overall percentage of transactions are loss transactions? 
+```{r}
+table(superstore.1$Profitable)
+profit.ratio=1101/(1101+4809)
+profit.ratio
+```
+
+## 18.6% of transactions are unprofitable. This likely differs based on the type of product.
+
+## Do loss transactions differ by product sub-category? Which types of items account for the most losses?
+```{r}
+losses=filter(superstore.1,Profit<0)
+loss.sales=losses
+loss.sales$Profit=abs(loss.sales$Profit)
+loss.sales.pie=plot_ly(loss.sales, labels=~Sub.Category,values=~Profit, sort=T,type = 'pie',
+                       textposition="inside", 
+                       direction="clockwise", 
+                       textinfo="label+percent",
+                       showlegend=FALSE)
+
+loss.sales.pie=loss.sales.pie %>% layout(title = 'Percentage of Loss Sale Value by Sub-category',
+                                         xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE), 
+                                         yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+loss.sales.pie
+```
+
+## Items in 3 sub-categories dominate the loss transactions: Binders, Tables, and Machines.
+
+## What are some of the specific products that incurred large losses?
+```{r}
+head(loss.sales[order(-loss.sales$Profit),],10)
+```
+
+## As these profit values are absolute values, the orders with the biggest losses ordered several 3D printers and electric binding systems. These items fit in the top 3 loss product sub-categories.
+## Many of these transactions were discounted by 70% or more.
+
+## I would like to check for returns to see if this is affecting a large number of orders, however the data does not include negative order quantities or sales amounts to indicate a return.
+## The only variable which could indicate a return is the Profit variable but in this case it is difficult to distinguish true losses vs. returns.
+## To assess this, I will look at a larger quantity of sales with negative profits to see if all or most had high discount amounts. A large sale with a negative profit (loss) but a small (or no) discount % could be a return.
+```{r}
+returns.check=plot_ly(data=losses,x=~Profit,y=~Discount,type="scatter",mode="markers")
+returns.check=returns.check %>% layout(title="Discount Levels by Amount of Profit by Transaction")
+returns.check
+```
+
+## Looking at the plot, it appears that transactions with large losses generally had higher discount levels (50% or more) although it's not possible to distinguish returns from losses consistently.
+
+## Are there certain types of products that tend to have higher levels of discounts? I will check the level of discount by product sub-category.
+```{r}
+Discount.Sub.Cat=superstore.1[,-c(1:4,6,7,9)]
+boxplot(Discount~Sub.Category,data=Discount.Sub.Cat,main="Discounts by Product Sub-category",xlab="Sub-category",ylab="Discount %",col="lightblue",border="darkblue")
+```
+
+## Ten of the seventeen sub-categories were generally not discounted or had very low median discounts.
+
+## The highest median discount percentage is generally 20% except for Tables which have a median discount of 30%. Binders have the highest 75th quartile discount at 70%, followed by Machines at 50% and Tables at 40%.
+
+## This data exploration is starting to uncover a pattern: high cost goods in a few categories are driving significant losses where discounts are significant. The retailer may want to reduce the level of discount on these items in the future (unless these items are being cleared out for newer versions and there is no choice).
+
+## Changing the focus, does ship mode vary considerably by region? This could reflect where the company warehouses are located.
+```{r}
+plot(Ship.Mode~Region,data=superstore.1,col=rainbow(17,start=.45,end=.95))
+```
+
+## The answer: not really. The Standard ship mode accounts for about 60% of shipments regardless of region. The Central region has a slightly lower percentage of First Class shipments.
+
+## Does ship mode vary by product sub-category? 
+```{r}
+plot(Ship.Mode~Sub.Category,data=superstore.1,col=rainbow(17,start=.45,end=.95))
+```
+
+## The sub-categories are generally consistent across ship mode percentages with a few exceptions. Bookcases, Copiers, and Machinery (heavy items) tend to ship First Class (at the expense of Standard Class) at a comparatively higher rate than other sub-categories.
+
+## Is there much seasonality for this retailer? A plot of sales over time by log(Sales) helps to answer the question.
+```{r}
+plot(log(Sales)~Ship.Date,data=superstore.1)
+```
+
+## Visually, it's obvious that Sales seem to be heavily concentrated toward the end of each calendar year.
+
+## Do items sold by Sub-category vary by Region?
+```{r}
+plot(Region~Sub.Category,data=superstore.1,col=rainbow(4,start=.45,end=.65))
+```
+
+## Yes, some do. For example, compared to other sub-categories, Copiers sell at a higher rate in the West vs. the South. The results are the same for Machines.
+
+## How does Sales revenue vary by Sub-category?
+```{r}
+Subcategory.Sales=plot_ly(superstore.1, labels=~Sub.Category,values=~Sales, sort=T,type = 'pie',
+                          textposition="inside", 
+                          direction="clockwise", 
+                          textinfo="label+percent",
+                          showlegend=FALSE)
+
+Subcategory.Sales=Subcategory.Sales %>% layout(title = 'Percentage of Total Sales by Sub-category',
+                                               xaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE), 
+                                               yaxis = list(showgrid = FALSE, zeroline = FALSE, showticklabels = FALSE))
+Subcategory.Sales
+```
+
+## Phones and Chairs combine for over a quarter of all revenue. The Binders, Copiers, and Machines sub-categories all account for over 7% of revenue so the retailer cannot simply drop these products without understanding profitability at a product level (as opposed to a sub-category level).
+
+## I'll now move from general EDA to visualization using principal components analysis (PCA) before clustering.
+
+## For this analysis, PCA and clustering will cover a variety of transactional quantitative variables.
+
+## The full view of the segments should highlight differences that can be addressed with tailored product or marketing offers.
+```{r}
+library(tidyr)
+
+summary(superstore.1)
+superstore.2=superstore.1 %>% 
+  group_by(Customer.ID) %>% 
+  summarise(Order.Count=n_distinct(Order.ID),Total.Unit.Quantity=sum(Quantity),Mean.Price.Unit=(sum(Sales)/sum(Quantity)),Total.Sales.Revenue=sum(Sales),Total.Profit=sum(Profit),Days.Since.Most.Recent.Order=min(Days.Since.Last.Order))
+```
+
+## I will round the values of the variables with decimals to reflect the monetary nature of the variables.
+```{r}
+summary(superstore.2)
+superstore.2$Mean.Price.Unit=round(superstore.2$Mean.Price.Unit,digits = 2)
+superstore.2$Total.Sales.Revenue=round(superstore.2$Total.Sales.Revenue,digits = 2)
+superstore.2$Total.Profit=round(superstore.2$Total.Profit,digits = 2)
+summary(superstore.2)
+```
+
+## I will also drop the Customer.ID variable before clustering.
+```{r}
+superstore.3=superstore.2[,-1]
+initial.cluster=scale(superstore.3)
+```
+
+# Cluster tendency visualization using PCA
+
+## First, I will run statistical verification using the Hopkins statistic to see if true clusters exist in the data:
+```{r}
+library(factoextra)
+library(cluster)
+Hop.test=get_clust_tendency(initial.cluster,n=nrow(initial.cluster)-1, graph=F)
+Hop.test$hopkins_stat
+```
+## The Hopkins statistic is 0.93, extremely close to 1, which indicates that the data is highly clusterable.
+
+## Next, I run Principal Components Analysis (PCA) to visualize the potential clusters.
+```{r}
+pr.out=prcomp(initial.cluster)
+summary(pr.out)
+```
+
+## Two principal components to explain 71% of the variance. The first principal component alone explains 43%.
+
+## A biplot will help to compare principal component loading vectors which indicate the weighting of the variables in building clusters.
+```{r}
+biplot(pr.out, scale=0)
+pr.out$rotation=-pr.out$rotation  # Make eigenvectors positive in the plot
+pr.out$x=-pr.out$x
+biplot(pr.out, scale=0)
+pr.var=pr.out$sdev^2
+pr.var
+```
+
+## The biplot shows that the clustering is unlikely to be dominated by a single variable given the length of the principal component loading vectors.
+
+## Next I'll use a scree plot to assess visually what the logical number of clusters may be.
+```{r}
+pve=pr.var/sum(pr.var)
+plot(pve, xlab="Principal Component", ylab="Proportion of Variance Explained", ylim=c(0,1),type='b')
+plot(cumsum(pve), xlab="Principal Component", ylab="Cumulative Proportion of Variance Explained", ylim=c(0,1),type='b')
+```
+
+## There is a "bend" in the plot at the proportion of variance explained by 3 principal components which may help to identify a logical number of clusters.
+
+## I will now assess the optimal number of clusters using a kmeans approach to start.
+```{r}
+library(NbClust)
+```
+
+## First, the elbow method:
+```{r}
+fviz_nbclust(initial.cluster,kmeans,method="wss") + geom_vline(xintercept=4,linetype=2) + labs(subtitle="Elbow method")
+```
+
+## The elbow method suggests that there 4 optimal clusters.
+
+## Next, the silhouette method:
+```{r}
+fviz_nbclust(initial.cluster,kmeans,method="silhouette") + labs(subtitle="Silhouette method")
+```
+
+## The silhouette method suggests 5 optimal clusters.
+
+## Last, the gap statistic method.
+```{r}
+set.seed(111) 
+fviz_nbclust(initial.cluster,kmeans,nstart=25,method="gap_stat",nboot=100) + labs(subtitle="Gap statistic method")
+```
+
+## The gap statistic suggests 2 clusters.
+
+## The results differ by method, with a range of 2-5 clusters, so I will use clValid as another assessment tool which can also help to identify the optimal clustering approach.
+```{r}
+library(clValid)
+clmethods=c("hierarchical","kmeans","pam")
+intern=clValid(initial.cluster,nClust=2:5,clMethods=clmethods,validation="internal",maxitems=nrow(initial.cluster)) 
+summary(intern)
+```
+
+## clValid suggests a hierarchical approach with 2 or 3 clusters will be optimal. 
+
+## My preference is for more than two clusters, if only to make marketing offer development more interesting to attract future customers.
+
+## As suggested by the clValid function, hierarchical (agglomerative) clustering will be used for the analysis using the agnes function (agglomerative nesting).
+```{r}
+library(cluster)
+res.agnes=agnes(x=initial.cluster,
+                stand = TRUE,
+                metric = "euclidean",
+                method = "ward")
+```
+
+## I will visualize the clusters as a dendrogram: 
+```{r}
+fviz_dend(res.agnes,cex=0.6)
+```
+
+## Reviewing the dendrogram, 3 or 4 clusters is logical, although one cluster will be quite small.
+
+## I will cut the tree to assign cluster groups to the observations. I start with the scaled data set.
+
+## First, I compute the dissimilarity matrix which measures similarity between objects for clustering.
+```{r}
+res.dist=dist(initial.cluster,method = "euclidean")
+```
+
+## Then I group the data using linkage based on the similarities identified in the dissimilarity matrix.
+```{r}
+res.hc=hclust(d=res.dist,method="ward.D2")
+```
+
+## Next, I cut the dendrogram using 3 clusters. I chose 3 clusters over 4 since one of the clusters would have been extremely small.
+```{r}
+grp=cutree(res.hc,k=3) 
+head(grp,n=10)
+```
+
+## Finally, I visualize the cuts in the dendrogram using 3 clusters.
+```{r}
+fviz_dend(res.hc,k=3,cex = 0.5,k_colors=c("#2E9FDF","#E7B800","#FC4E07"),color_labels_by_k=TRUE,rect=TRUE)
+```
+
+## I will now add the cluster identities back to the clustered data set.
+```{r}
+initial.cluster.1=initial.cluster
+initial.cluster.1=as.data.frame(initial.cluster.1)
+initial.cluster.1$cluster=grp
+str(initial.cluster.1)
+```
+
+## How many observations belong to each cluster?
+```{r}
+table(initial.cluster.1$cluster)
+```
+
+## Clusters 2 and 3 are nearly the same size, while cluster 1 is much smaller, about 1/6th the size of the other clusters (8% of total observations).
+
+## Now I want to understand the impact of the variables that determine cluster membership.
+
+## There are many ways to tell this part of the story, but I find radar and pie charts to be helpful.
+
+## Change the cluster variable to a factor.
+```{r}
+initial.cluster.1$cluster=as.factor(initial.cluster.1$cluster)
+str(initial.cluster.1)
+```
+
+## The observations belonging to each group:
+```{r}
+initial.cluster.1.seg1=subset(initial.cluster.1,cluster==1)
+initial.cluster.1.seg2=subset(initial.cluster.1,cluster==2)
+initial.cluster.1.seg3=subset(initial.cluster.1,cluster==3)
+```
+
+## Reshape the data to prepare it for a radar chart.
+```{r}
+library(reshape)
+clusters.all=melt(initial.cluster.1,id="cluster")
+clusters.all.cast=cast(clusters.all,cluster~variable,mean)
+clusters.all.cast
+```
+
+## Update the customer segment names.
+```{r}
+clusters.all.cast$cluster=gsub("1","Segment 1",clusters.all.cast$cluster)
+clusters.all.cast$cluster=gsub("2","Segment 2",clusters.all.cast$cluster)
+clusters.all.cast$cluster=gsub("3","Segment 3",clusters.all.cast$cluster)
+clusters.all.cast
+```
+
+## Convert the cluster variable to a row name.
+```{r}
+clusters.all.cast.1=clusters.all.cast[,-1]
+rownames(clusters.all.cast.1)=clusters.all.cast[,1]
+rownames(clusters.all.cast.1)
+```
+
+## I will now plot the data using radar charts which visually show differentiating factors by cluster.
+
+## Radar plots cannot handle negative values so I will check to see if any negative values exist.
+```{r}
+min.value=min(clusters.all.cast.1)
+min.value
+```
+
+## The minimum value is -0.7214505. The absolute value of the minimum will be added to all observations in the data set to re-set the new minimum value to 0 for the radar plot.
+```{r}
+data.for.radar=clusters.all.cast.1+(abs(min.value))
+data.for.radar
+```
+
+## Now the radar plot:
+```{r}
+library(fmsb)
+set.seed(59)
+max.seg=max(clusters.all.cast.1)
+min.seg=min(clusters.all.cast.1)
+```
+
+## I have to add rows representing maximum and minimum values to the data set for the purpose of creating the chart.
+```{r}
+cluster.radar=rbind(rep(max.seg,6),rep(min.seg,6),clusters.all.cast.1)
+```
+
+## Color vector for the radar plot:
+```{r}
+colors_border=c(rgb(0.2,0.5,0.5,0.9),rgb(0.8,0.2,0.5,0.9),rgb(0.7,0.5,0.1,0.9))
+colors_in=c(rgb(0.2,0.5,0.5,0.4),rgb(0.8,0.2,0.5,0.4),rgb(0.7,0.5,0.1,0.4))
+
+radarchart(cluster.radar,axistype=1,pcol=colors_border, pfcol=colors_in,plwd=4,plty=1,cglcol="grey", cglty=1, axislabcol="grey", caxislabels=seq(min.seg,max.seg,6), cglwd=0.8,vlcex=0.9)
+legend(x=1.1, y=1.2, legend = rownames(cluster.radar[-c(1,2),]), bty = "n", pch=20 , col=colors_in , text.col = "grey", cex=1.2, pt.cex=3)
+```
+
+## The radar chart makes it easy to differentiate the transactional behavior of each cluster.
+
+# Customers in Segment 1, the smallest cluster, provide the highest revenue, are the most profitable, and pay the highest mean price per unit. They tend to buy somewhat infrequently and in moderate quantities.
+
+# Customers in Segment 2, the largest cluster, are most characterized by their recent order history. These customers infrequently buy low-priced units in small amounts.
+
+# Customers in Segment 3, the second-largest cluster, have higher orders and quantities than the other clusters. They contribute more revenue than Segment 2 but still much less (per customer) than Segment 1. These customers have not ordered recently compared to the other two clusters.
+
+## While interesting, a better framing of the segments would include information about what the customers in each segment purchase. I will add that information to improve the robustness of the segment profiles for marketing offer development.
+
+## I revisit the data set that includes sub-category variables.
+```{r}
+str(superstore.1)
+```
+
+## I will spread the sales revenue by sub-category, keeping only the customer ID in this data set.
+```{r}
+superstore.1.subcat=superstore.1[,-c(1:5,7:15,17,19:24)]
+str(superstore.1.subcat)
+
+subcat.set=superstore.1.subcat %>% 
+  group_by(Customer.ID,Sub.Category) %>% 
+  summarise(Total.Sales=sum(Sales)) %>% 
+  spread(Sub.Category,Total.Sales)
+subcat.set[is.na(subcat.set)]=0
+summary(subcat.set)
+```
+
+## Now that I have the sales data by sub-category, I can merge this data set with the data set that includes segments identified by Customer ID.
+
+## First I need to add Customer ID back to the clustered data set so that I can identify customer ID's by cluster.
+```{r}
+customer.ID.cluster=bind_cols(superstore.2[1],initial.cluster.1)
+str(customer.ID.cluster)
+```
+
+## Next I can merge the sub-category sales data with the customer segment data. The result will be a data frame that contains purchase amounts by cluster.
+
+```{r}
+cluster.subcat.sales=merge(customer.ID.cluster,subcat.set,by="Customer.ID")
+cluster.subcat.sales.cons=cluster.subcat.sales[,-c(1:7)]
+str(cluster.subcat.sales.cons)
+```
+
+## I'm most interested in the proportion of revenue by sub-category so I will use the prop.table function to put the data on a percentage-basis by Customer ID.
+```{r}
+cluster.subcat.sales.cons.mat=as.matrix(cluster.subcat.sales.cons[,-1])
+cluster.subcat.sales.cons.mat=prop.table(cluster.subcat.sales.cons.mat,margin=1)
+cluster.subcat.sales.cons.mat=as.data.frame(cluster.subcat.sales.cons.mat)
+cluster.subcat.sales.cons=bind_cols(cluster.subcat.sales.cons.mat,cluster.subcat.sales.cons)
+colnames(cluster.subcat.sales.cons)
+final.subcat.cluster=cluster.subcat.sales.cons[,-c(19:35)]
+summary(final.subcat.cluster)
+```
+
+## Now I will plot the results using another radar chart, following the same steps that I used previously.
+
+## Change the cluster variable to a factor.
+```{r}
+final.subcat.cluster$cluster=as.factor(final.subcat.cluster$cluster)
+str(final.subcat.cluster)
+```
+
+## The observations belonging to each group:
+```{r}
+final.subcat.cluster.seg1=subset(final.subcat.cluster,cluster==1)
+final.subcat.cluster.seg2=subset(final.subcat.cluster,cluster==2)
+final.subcat.cluster.seg3=subset(final.subcat.cluster,cluster==3)
+```
+
+## I will reshape the data to prepare it for a radar chart.
+```{r}
+library(reshape)
+clusters.all.2=melt(final.subcat.cluster,id="cluster")
+clusters.all.cast.2=cast(clusters.all.2,cluster~variable,mean)
+clusters.all.cast.2
+```
+
+## Update the customer segment names.
+```{r}
+clusters.all.cast.2$cluster=gsub("1","Segment 1",clusters.all.cast.2$cluster)
+clusters.all.cast.2$cluster=gsub("2","Segment 2",clusters.all.cast.2$cluster)
+clusters.all.cast.2$cluster=gsub("3","Segment 3",clusters.all.cast.2$cluster)
+clusters.all.cast.2
+```
+
+## Convert the cluster variable to a row name.
+```{r}
+clusters.all.cast.3=clusters.all.cast.2[,-1]
+rownames(clusters.all.cast.3)=clusters.all.cast.2[,1]
+rownames(clusters.all.cast.3)
+```
+
+## Plot the data using radar charts which visually show differentiating factors by cluster. But first, check for any negative values.
+
+```{r}
+min.value=min(clusters.all.cast.3)
+min.value
+```
+
+## The minimum value is positive (.0002) so no adjustments are needed.
+
+## Now the radar plot:
+```{r}
+library(fmsb)
+set.seed(59)
+max.seg=max(clusters.all.cast.3)
+min.seg=min(clusters.all.cast.3)
+```
+
+## Adding rows representing maximum and minimum values to the data set for the purpose of creating the chart.
+```{r}
+cluster.radar.2=rbind(rep(max.seg,17),rep(min.seg,17),clusters.all.cast.3)
+```
+
+## Color vector for the radar plot:
+```{r}
+{colors_border=c(rgb(0.2,0.5,0.5,0.9),rgb(0.8,0.2,0.5,0.9),rgb(0.7,0.5,0.1,0.9) )
+colors_in=c(rgb(0.2,0.5,0.5,0.4),rgb(0.8,0.2,0.5,0.4),rgb(0.7,0.5,0.1,0.4) )
+
+radarchart(cluster.radar.2,axistype=1,pcol=colors_border,pfcol=colors_in,plwd=4,plty=1,cglcol="grey", cglty=1, axislabcol="grey", caxislabels=seq(min.seg,max.seg,17),cglwd=0.8,vlcex=0.9)
+legend(x=1.1, y=1.2, legend = rownames(cluster.radar.2[-c(1,2),]), bty = "n", pch=20 , col=colors_in , text.col = "grey", cex=1.2, pt.cex=3)}
+```
+
+# This chart helps to tell the stories for each cluster. When I add the learnings from the first radar chart, segment profiles start to emerge.
+
+# The initial radar chart noted that Segment 1 customers buy high-priced, high profit items. This chart confirms that story, as Segment 1 customers purchase expensive Copiers, Machines, and Binder systems.
+# Segment 1 customers are likely larger businesses making investments in long-lived office equipment. Many of these types of machines are purchased when a previous machine stops working, so office customers typically cannot wait for a price promotion at the risk of disturbing their business.
+# From a marketing perspective, these are extremely valuable customers. They may be interested in services related to the high-priced equipment that they buy. The retailer's marketing team may also want to target them with advertisements that reinforce the brand of the retailer rather than one-off promotions.
+
+# Segment 2 customers buy more furnishings, paper, and storage than the other segments. From the initial radar chart, this segment does not buy often and when they do buy, they purchase small quantities at low sales amounts.
+# These customers may be home offices, or more simply, customers that made purchases due to a price promotion since their defining characteristic in terms of transactional behavior is that they made a recent purchase.
+# The retailer's marketing team may want to focus on loyalty programs with this segment, encouraging them to make repeated purchases so that the customer doesn't churn out. Price promotions may also be very attractive for this segment.
+
+# Segment 3 customers have not ordered from the retailer recently, but when they did, they ordered large quantities of items fairly often and at a moderate sales revenue amount.
+# These customers may need an incentive to buy from the retailer again, such as a "welcome back" coupon for a discount on a future order. Segment 3 customers are really the lifeblood of the business and purchase a wide variety of items, including more tables, chairs, and phones than the other segments.
+
+# The goal of this analysis was to better understand the retailers customers, including identifying potential segments and preparing relevant offers for each segment. The retailer must now use this information to develop stronger relationships with each customer type and grow overall revenue.
+
